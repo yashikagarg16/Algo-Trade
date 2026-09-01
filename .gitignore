@@ -1,0 +1,17 @@
+node_modules
+.dist
+.dist/**
+dist
+.env
+.env.*
+__pycache__/
+*.py[cod]
+*.pyc
+backend/.venv
+backend/venv
+.idea/
+.vscode/
+.DS_Store
+attached_assets
+*.log
+auth_response.txt
