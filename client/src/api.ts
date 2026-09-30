@@ -15,9 +15,26 @@ import type {
   SparklineSeries,
   SearchResult,
   ChartResponse,
+  AuthConfig,
+  VisitorsResponse,
+  CustomStrategy,
+  PortfolioResponse,
+  StrategyRules,
+  WalkForwardPayload,
+  WalkForwardResult,
 } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
+
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
 
 interface RequestOptions {
   method?: string;
@@ -25,7 +42,7 @@ interface RequestOptions {
   token?: string;
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, token } = options;
   const headers: HeadersInit = {
     Accept: "application/json",
@@ -50,24 +67,20 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   const text = await response.text();
-  const data = text ? JSON.parse(text) : undefined;
-
-
-if (response.status === 401) {
-  const unauthorizedDetail = data?.detail ?? response.statusText;
-  if (typeof window !== "undefined") {
-    window.localStorage.removeItem("algo-trade-session");
+  let data: unknown;
+  try {
+    data = text ? JSON.parse(text) : undefined;
+  } catch {
+    // Non-JSON body, e.g. a plain-text "Internal Server Error" from a proxy or crashed handler.
+    data = { detail: text };
   }
-  const unauthorizedError = new Error(
-    typeof unauthorizedDetail === "string" ? unauthorizedDetail : JSON.stringify(unauthorizedDetail),
-  );
-  (unauthorizedError as Error & { status?: number }).status = 401;
-  throw unauthorizedError;
-}
 
   if (!response.ok) {
-    const detail = data?.detail ?? response.statusText;
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    if (response.status === 401 && typeof window !== "undefined") {
+      window.localStorage.removeItem("algo-trade-session");
+    }
+    const detail = (data as { detail?: unknown } | undefined)?.detail ?? response.statusText;
+    throw new ApiError(response.status, typeof detail === "string" ? detail : JSON.stringify(detail));
   }
 
   return data as T;
@@ -100,6 +113,41 @@ export function signup(payload: SignupPayload) {
 
 export function login(payload: LoginPayload) {
   return request<AuthResponse>("/auth/login", { method: "POST", body: payload });
+}
+
+export function fetchAuthConfig() {
+  return request<AuthConfig>("/auth/config");
+}
+
+export function googleLogin(credential: string) {
+  return request<AuthResponse>("/auth/google", { method: "POST", body: { credential } });
+}
+
+export function fetchMe(token: string) {
+  return request<User>("/auth/me", { token });
+}
+
+export function fetchVisitors(token: string) {
+  return request<VisitorsResponse>("/admin/visitors", { token });
+}
+
+export function fetchPortfolio(token: string) {
+  return request<PortfolioResponse>("/portfolio", { token });
+}
+
+export function fetchCustomStrategies(token: string) {
+  return request<CustomStrategy[]>("/strategies/custom", { token });
+}
+
+export function saveCustomStrategy(
+  token: string,
+  payload: { name: string; description?: string; rules: StrategyRules },
+) {
+  return request<CustomStrategy>("/strategies/custom", { method: "POST", body: payload, token });
+}
+
+export function deleteCustomStrategy(token: string, id: string) {
+  return request<void>(`/strategies/custom/${encodeURIComponent(id)}`, { method: "DELETE", token });
 }
 
 export function devAuthBypass(payload?: DevAuthBypassPayload) {
@@ -150,10 +198,19 @@ export function trainStrategy(token: string, payload: TrainingPayload) {
   return request<TrainingResult>("/analytics/train", { method: "POST", body: payload, token });
 }
 
-export function predictStrategy(token: string, symbol: string) {
+export function runWalkForward(token: string, payload: WalkForwardPayload) {
+  return request<WalkForwardResult>("/analytics/walk-forward", { method: "POST", body: payload, token });
+}
+
+export function predictStrategy(
+  token: string,
+  symbol: string,
+  strategy?: { strategyId: string; parameters: Record<string, number>; rules?: StrategyRules | null },
+) {
+  // Sending the strategy lets any server instance answer, even one that didn't run the backtest.
   return request<PredictionResult>("/analytics/predict", {
     method: "POST",
-    body: { symbol },
+    body: { symbol, ...strategy },
     token,
   });
 }

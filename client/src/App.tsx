@@ -1,8 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createSimulation,
   deleteSimulation,
   devAuthBypass,
+  fetchAuthConfig,
+  fetchMe,
+  fetchVisitors,
+  fetchPortfolio,
+  fetchCustomStrategies,
+  saveCustomStrategy,
+  deleteCustomStrategy,
+  googleLogin,
   fetchOverview,
   fetchSimulations,
   fetchStrategies,
@@ -14,6 +22,7 @@ import {
   predictStrategy,
   signup,
   trainStrategy,
+  runWalkForward,
   updateSimulation,
   askChat,
   type AuthResponse,
@@ -26,7 +35,27 @@ import { StrategyCatalog } from "./components/StrategyCatalog";
 import { LiveMarketPage } from "./components/LiveMarketPage";
 import { LoginForm } from "./components/LoginForm";
 import { SignupForm } from "./components/SignupForm";
+import { GoogleLoginPage } from "./components/GoogleLoginPage";
+import { googleSignOut } from "./components/GoogleSignIn";
+import { VisitorsPage } from "./components/VisitorsPage";
+import { PortfolioPage } from "./components/PortfolioPage";
+import { StrategyBuilder } from "./components/StrategyBuilder";
+import {
+  BuilderIcon,
+  ChatIcon,
+  HomeIcon,
+  LiveIcon,
+  LogoMark,
+  LogoutIcon,
+  PortfolioIcon,
+  SimulationsIcon,
+  StrategyIcon,
+  VisitorsIcon,
+} from "./components/Icons";
 import type {
+  AuthConfig,
+  CustomStrategy,
+  StrategyRules,
   ChatAction,
   ChatMessage,
   MarketQuote,
@@ -38,6 +67,7 @@ import type {
   StrategyDefinition,
   TrainingPayload,
   TrainingResult,
+  WalkForwardPayload,
   SparklineSeries,
   User,
 } from "./types";
@@ -47,7 +77,7 @@ const WATCHLIST_SYMBOLS = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA"];
 const TRUTHY_ENV_FLAGS = new Set(["1", "true", "yes", "on"]);
 
 type AuthView = "login" | "signup" | "dashboard";
-type Page = "home" | "simulations" | "chat" | "strategies" | "live";
+type Page = "home" | "portfolio" | "simulations" | "builder" | "chat" | "strategies" | "live" | "visitors";
 
 interface SessionState {
   token: string;
@@ -65,6 +95,17 @@ const LOGIN_BYPASS_ENABLED = isEnvFlagEnabled(import.meta.env.VITE_ENABLE_LOGIN_
 const LOGIN_BYPASS_EMAIL = import.meta.env.VITE_LOGIN_BYPASS_EMAIL;
 const LOGIN_BYPASS_NAME = import.meta.env.VITE_LOGIN_BYPASS_NAME;
 const LOGIN_BYPASS_PATH = "/dev/auth/bypass";
+
+const NAV_ITEMS: Array<{ page: Page; label: string; icon: typeof HomeIcon; adminOnly?: boolean }> = [
+  { page: "home", label: "Overview", icon: HomeIcon },
+  { page: "portfolio", label: "Portfolio", icon: PortfolioIcon },
+  { page: "simulations", label: "Simulations", icon: SimulationsIcon },
+  { page: "builder", label: "Strategy builder", icon: BuilderIcon },
+  { page: "chat", label: "Trading copilot", icon: ChatIcon },
+  { page: "strategies", label: "Strategies", icon: StrategyIcon },
+  { page: "live", label: "Live markets", icon: LiveIcon },
+  { page: "visitors", label: "Visitors", icon: VisitorsIcon, adminOnly: true },
+];
 
 function extractHistory(messages: ChatMessage[]): Array<{ role: "user" | "assistant"; content: string }> {
   return messages
@@ -90,6 +131,14 @@ export default function App() {
   const [labLoading, setLabLoading] = useState(false);
   const [chatLoading, setChatLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
+
+  useEffect(() => {
+    fetchAuthConfig()
+      .then(setAuthConfig)
+      // Older or unreachable backends: fall back to email/password and the dev bypass.
+      .catch(() => setAuthConfig({ googleClientId: null, passwordLogin: true, devBypass: true }));
+  }, []);
 
   const [bypassRequestedFromPath] = useState(() => {
     if (typeof window === "undefined") {
@@ -99,8 +148,9 @@ export default function App() {
   });
   const loginBypassEnabled = LOGIN_BYPASS_ENABLED || bypassRequestedFromPath;
   const [initializingBypass, setInitializingBypass] = useState(loginBypassEnabled);
-  const [bypassInProgress, setBypassInProgress] = useState(false);
+  const bypassInProgressRef = useRef(false);
   const [bypassFailed, setBypassFailed] = useState(false);
+  const [bypassDismissed, setBypassDismissed] = useState(false);
 
   const bypassPayload = useMemo<DevAuthBypassPayload | undefined>(() => {
     const email = LOGIN_BYPASS_EMAIL?.trim();
@@ -114,7 +164,8 @@ export default function App() {
     };
   }, []);
 
-  const shouldAttemptBypass = loginBypassEnabled && !bypassFailed && !token && !user;
+  const shouldAttemptBypass =
+    loginBypassEnabled && authConfig?.devBypass === true && !bypassFailed && !bypassDismissed && !token && !user;
 
   useEffect(() => {
     const stored = window.localStorage.getItem("algo-trade-session");
@@ -233,6 +284,22 @@ export default function App() {
     [handleAuthSuccess],
   );
 
+  const handleGoogleCredential = useCallback(
+    async (credential: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        handleAuthSuccess(await googleLogin(credential));
+      } catch (authError) {
+        console.error(authError);
+        setError(authError instanceof Error ? authError.message : "Google sign-in failed.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [handleAuthSuccess],
+  );
+
   const handleSignup = useCallback(
     async (name: string, email: string, password: string) => {
       setLoading(true);
@@ -256,34 +323,28 @@ export default function App() {
       return;
     }
 
+    if (bypassInProgressRef.current || !authConfig) {
+      return; // wait for the auth config: a Google-only deployment has no bypass
+    }
+
     if (!shouldAttemptBypass) {
       setInitializingBypass(false);
       return;
     }
 
-    if (bypassInProgress) {
-      return;
-    }
-
-    setBypassInProgress(true);
+    // A ref (not state) guards the request so re-renders and StrictMode's double effect
+    // don't cancel the in-flight login and leave the app stuck on "Signing you in...".
+    bypassInProgressRef.current = true;
     setInitializingBypass(true);
     setError(null);
     setLoading(true);
 
-    let cancelled = false;
-
     const run = async () => {
       try {
         const response = await devAuthBypass(bypassPayload);
-        if (cancelled) {
-          return;
-        }
         setBypassFailed(false);
         handleAuthSuccess(response);
       } catch (bypassError) {
-        if (cancelled) {
-          return;
-        }
         console.error(bypassError);
         setBypassFailed(true);
         setError(
@@ -292,20 +353,14 @@ export default function App() {
             : "Login bypass is unavailable. Please sign in manually.",
         );
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-          setBypassInProgress(false);
-          setInitializingBypass(false);
-        }
+        bypassInProgressRef.current = false;
+        setLoading(false);
+        setInitializingBypass(false);
       }
     };
 
     void run();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [loginBypassEnabled, shouldAttemptBypass, bypassInProgress, bypassPayload, handleAuthSuccess]);
+  }, [loginBypassEnabled, authConfig, shouldAttemptBypass, bypassPayload, handleAuthSuccess]);
 
   const handleCreateSimulation = useCallback(
     async (payload: SimulationInput) => {
@@ -405,7 +460,11 @@ export default function App() {
       setLabLoading(true);
       setError(null);
       try {
-        const result = await predictStrategy(token, symbol);
+        const trained =
+          trainingResult && trainingResult.symbol === symbol.toUpperCase()
+            ? { strategyId: trainingResult.strategyId, parameters: trainingResult.parameters, rules: trainingResult.rules }
+            : undefined;
+        const result = await predictStrategy(token, symbol, trained);
         setPredictionResult(result);
       } catch (predictError) {
         if (handleAuthFailure(predictError)) {
@@ -417,10 +476,10 @@ export default function App() {
         setLabLoading(false);
       }
     },
-    [token],
+    [token, trainingResult],
   );
 
-  const handleLogout = useCallback(() => {
+  const resetSession = useCallback(() => {
     setToken(null);
     setUser(null);
     setSimulations([]);
@@ -433,6 +492,13 @@ export default function App() {
     setView("login");
   }, []);
 
+  // An explicit logout stops the dev bypass from signing the user straight back in.
+  const handleLogout = useCallback(() => {
+    setBypassDismissed(true);
+    googleSignOut();
+    resetSession();
+  }, [resetSession]);
+
   const handleAuthFailure = useCallback((issue: unknown) => {
     if (issue && typeof issue === "object" && "status" in (issue as { status?: number })) {
       const status = (issue as { status?: number }).status;
@@ -440,13 +506,65 @@ export default function App() {
         if (typeof window !== "undefined") {
           window.localStorage.removeItem("algo-trade-session");
         }
-        handleLogout();
+        resetSession();
         setError("Session expired. Please sign in again.");
         return true;
       }
     }
     return false;
-  }, [handleLogout]);
+  }, [resetSession]);
+
+  // Stored sessions predate role changes, so ask the server who we are (isAdmin, profile photo).
+  useEffect(() => {
+    if (!token) return;
+    fetchMe(token)
+      .then((me) => setUser((current) => (current && current.id === me.id ? { ...current, ...me } : current)))
+      .catch((meError) => handleAuthFailure(meError));
+  }, [token, handleAuthFailure]);
+
+  // Each page starts at the top instead of inheriting the previous page's scroll position.
+  useEffect(() => {
+    window.scrollTo({ top: 0 });
+  }, [page]);
+
+  const loadVisitors = useCallback(() => fetchVisitors(token ?? ""), [token]);
+  const loadPortfolio = useCallback(() => fetchPortfolio(token ?? ""), [token]);
+
+  const [customStrategies, setCustomStrategies] = useState<CustomStrategy[]>([]);
+  useEffect(() => {
+    if (!token) {
+      setCustomStrategies([]);
+      return;
+    }
+    fetchCustomStrategies(token)
+      .then(setCustomStrategies)
+      .catch((loadError) => {
+        if (!handleAuthFailure(loadError)) console.error(loadError);
+      });
+  }, [token, handleAuthFailure]);
+
+  const handleWalkForward = useCallback(
+    (payload: WalkForwardPayload) => runWalkForward(token ?? "", payload),
+    [token],
+  );
+  const handleBuilderBacktest = useCallback(
+    (symbol: string, rules: StrategyRules) => trainStrategy(token ?? "", { symbol, strategyId: "custom", rules }),
+    [token],
+  );
+  const handleSaveCustomStrategy = useCallback(
+    async (name: string, description: string, rules: StrategyRules) => {
+      const saved = await saveCustomStrategy(token ?? "", { name, description: description || undefined, rules });
+      setCustomStrategies((previous) => [saved, ...previous]);
+    },
+    [token],
+  );
+  const handleDeleteCustomStrategy = useCallback(
+    async (id: string) => {
+      await deleteCustomStrategy(token ?? "", id);
+      setCustomStrategies((previous) => previous.filter((item) => item.id !== id));
+    },
+    [token],
+  );
 
   const handleSearchSymbols = useCallback(
     async (query: string) => {
@@ -528,15 +646,26 @@ export default function App() {
 
   const authError = useMemo(() => (view === "dashboard" ? null : error), [view, error]);
 
-  if (initializingBypass) {
+  if (initializingBypass || (!authConfig && !token)) {
     return (
       <div className="splash">
-        Signing you in...
+        <LogoMark size={56} />
+        Preparing your workspace…
       </div>
     );
   }
 
   if (!token || !user || view !== "dashboard") {
+    if (authConfig?.googleClientId) {
+      return (
+        <GoogleLoginPage
+          clientId={authConfig.googleClientId}
+          onCredential={handleGoogleCredential}
+          loading={loading}
+          error={authError}
+        />
+      );
+    }
     return view === "signup" ? (
       <SignupForm
         loading={loading}
@@ -586,17 +715,32 @@ export default function App() {
             onDeleteSimulation={handleDeleteSimulation}
             onTrainStrategy={handleTrainStrategy}
             onPredictStrategy={handlePredictStrategy}
+            onWalkForward={handleWalkForward}
             recentTraining={trainingResult}
             recentPrediction={predictionResult}
             onLogout={handleLogout}
             loading={loading || labLoading}
             error={error}
+            customStrategies={customStrategies}
+          />
+        );
+      case "portfolio":
+        return <PortfolioPage onLoad={loadPortfolio} onOpenSimulations={() => setPage("simulations")} />;
+      case "builder":
+        return (
+          <StrategyBuilder
+            saved={customStrategies}
+            onBacktest={handleBuilderBacktest}
+            onSave={handleSaveCustomStrategy}
+            onDelete={handleDeleteCustomStrategy}
           />
         );
       case "chat":
         return <ChatbotPanel messages={chatMessages} loading={chatLoading} onSend={handleChatSend} />;
       case "strategies":
         return <StrategyCatalog strategies={strategies} />;
+      case "visitors":
+        return user.isAdmin ? <VisitorsPage onLoad={loadVisitors} /> : null;
       case "live":
         return (
           <LiveMarketPage
@@ -614,41 +758,45 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <strong>Algo Trade Simulator</strong>
-          <span className="subtle">{user.email}</span>
+          <div className="brand-row">
+            <LogoMark size={40} />
+            <strong>
+              Algo Trade
+              <small>Simulator</small>
+            </strong>
+          </div>
+          <div className="profile">
+            {user.picture ? (
+              <img className="avatar" src={user.picture} alt="" referrerPolicy="no-referrer" />
+            ) : (
+              <span className="avatar placeholder">{user.name.slice(0, 1).toUpperCase()}</span>
+            )}
+            <div>
+              <div>{user.name}</div>
+              <span className="subtle">{user.email}</span>
+            </div>
+          </div>
         </div>
         <nav>
-          <button type="button" className={page === "home" ? "active" : ""} onClick={() => setPage("home")}>
-            Home
-          </button>
-          <button
-            type="button"
-            className={page === "simulations" ? "active" : ""}
-            onClick={() => setPage("simulations")}
-          >
-            Simulations
-          </button>
-          <button type="button" className={page === "chat" ? "active" : ""} onClick={() => setPage("chat")}>
-            Chatbot
-          </button>
-          <button
-            type="button"
-            className={page === "strategies" ? "active" : ""}
-            onClick={() => setPage("strategies")}
-          >
-            Strategy info
-          </button>
-          <button
-            type="button"
-            className={page === "live" ? "active" : ""}
-            onClick={() => setPage("live")}
-          >
-            Live data
-          </button>
+          <span className="nav-label">Workspace</span>
+          {NAV_ITEMS.filter((item) => !item.adminOnly || user.isAdmin).map(({ page: target, label, icon: NavIcon }) => (
+            <button
+              key={target}
+              type="button"
+              className={page === target ? "active" : ""}
+              aria-current={page === target ? "page" : undefined}
+              onClick={() => setPage(target)}
+            >
+              <NavIcon />
+              {label}
+            </button>
+          ))}
         </nav>
-        <button type="button" className="logout" onClick={handleLogout}>
+        <button type="button" className="logout button-ghost" onClick={handleLogout}>
+          <LogoutIcon />
           Log out
         </button>
+        <p className="sidebar-footnote">For education only · not financial advice</p>
       </aside>
       <main className="content">
         {error && page !== "simulations" ? <div className="error-banner">{error}</div> : null}

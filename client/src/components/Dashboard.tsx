@@ -1,4 +1,5 @@
 import type {
+  CustomStrategy,
   MarketQuote,
   Simulation,
   SimulationInput,
@@ -7,6 +8,8 @@ import type {
   TrainingResult,
   PredictionResult,
   User,
+  WalkForwardPayload,
+  WalkForwardResult,
 } from "../types";
 import { SimulationForm } from "./SimulationForm";
 import { SimulationList } from "./SimulationList";
@@ -23,11 +26,13 @@ interface DashboardProps {
   onDeleteSimulation: (id: string) => Promise<void> | void;
   onTrainStrategy: (payload: TrainingPayload) => Promise<void> | void;
   onPredictStrategy: (symbol: string) => Promise<void> | void;
+  onWalkForward?: (payload: WalkForwardPayload) => Promise<WalkForwardResult>;
   recentTraining: TrainingResult | null;
   recentPrediction: PredictionResult | null;
   onLogout: () => void;
   loading: boolean;
   error?: string | null;
+  customStrategies?: CustomStrategy[];
 }
 
 export function Dashboard({
@@ -40,34 +45,33 @@ export function Dashboard({
   onDeleteSimulation,
   onTrainStrategy,
   onPredictStrategy,
+  onWalkForward,
   recentTraining,
   recentPrediction,
   onLogout,
   loading,
   error,
+  customStrategies,
 }: DashboardProps) {
   return (
     <main>
       <div className="header">
         <div>
-          <h1>Simulation workspace</h1>
-          <p style={{ color: "rgba(226,232,240,0.7)", margin: "0.4rem 0 0" }}>
-            Track real-time market moves, iterate on strategies, and manage experiments.
-          </p>
+          <span className="eyebrow">Workspace</span>
+          <h1>Simulations</h1>
+          <p>Track live market moves, backtest strategies, and manage your paper-trading experiments.</p>
         </div>
-        <button type="button" onClick={onLogout} style={{ background: "#ef4444" }}>
-          Log out
-        </button>
       </div>
 
       {error && <div className="error-banner">{error}</div>}
 
       <div className="section-grid">
         <Watchlist quotes={watchlist} onRefresh={onRefreshWatchlist} loading={loading} />
-        <SimulationForm onSubmit={onCreateSimulation} loading={loading} />
+        <SimulationForm onSubmit={onCreateSimulation} loading={loading} customStrategies={customStrategies} />
         <StrategyTrainer
           onTrain={onTrainStrategy}
           onPredict={onPredictStrategy}
+          onWalkForward={onWalkForward}
           training={recentTraining}
           prediction={recentPrediction}
           loading={loading}

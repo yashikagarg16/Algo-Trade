@@ -2,6 +2,37 @@ export interface User {
   id: string;
   email: string;
   name: string;
+  picture?: string;
+  isAdmin?: boolean;
+}
+
+export interface AuthConfig {
+  googleClientId: string | null;
+  passwordLogin: boolean;
+  devBypass: boolean;
+}
+
+export interface Visitor extends User {
+  createdAt: string | null;
+  lastLoginAt: string | null;
+  loginCount: number;
+}
+
+export interface SignInEvent {
+  id: string;
+  userId: string;
+  email: string;
+  name: string;
+  picture?: string | null;
+  provider: string;
+  userAgent?: string | null;
+  at: string;
+}
+
+export interface VisitorsResponse {
+  users: Visitor[];
+  logins: SignInEvent[];
+  totalUsers: number;
 }
 
 export interface MarketQuote {
@@ -22,6 +53,10 @@ export interface Simulation {
   status: string;
   createdAt: string;
   notes?: string | null;
+  strategyId?: string;
+  parameters?: Record<string, number>;
+  rules?: StrategyRules | null;
+  startDate?: string;
 }
 
 export interface SimulationInput {
@@ -29,6 +64,85 @@ export interface SimulationInput {
   strategy: string;
   startingCapital: number;
   notes?: string;
+  strategyId?: string;
+  parameters?: Record<string, number>;
+  rules?: StrategyRules | null;
+  startDate?: string;
+}
+
+/* ---------- Strategy Builder ---------- */
+
+export type OperandKind = "price" | "sma" | "ema" | "rsi" | "value";
+
+export interface Operand {
+  kind: OperandKind;
+  period?: number;
+  value?: number;
+}
+
+export type ConditionOp = ">" | "<" | "crosses_above" | "crosses_below";
+
+export interface Condition {
+  left: Operand;
+  op: ConditionOp;
+  right: Operand;
+}
+
+export interface StrategyRules {
+  entry: Condition[];
+  exit: Condition[];
+  stopLoss?: number | null;
+  takeProfit?: number | null;
+}
+
+export interface CustomStrategy {
+  id: string;
+  name: string;
+  description?: string | null;
+  rules: StrategyRules;
+  createdAt: string;
+}
+
+/* ---------- Portfolio ---------- */
+
+export interface PortfolioPosition {
+  id: string;
+  symbol: string;
+  strategy: string;
+  strategyId: string;
+  status: string;
+  startingCapital: number;
+  currency: string;
+  value: number;
+  pnl: number;
+  pnlPct: number;
+  dayChange?: number;
+  dayChangePct?: number;
+  inMarket?: boolean;
+  shares?: number;
+  lastPrice?: number;
+  startDate?: string;
+  startPrice?: number;
+  buyHoldValue?: number;
+  trades?: number;
+  history?: Array<{ date: string; value: number }>;
+  error?: string;
+}
+
+export interface PortfolioResponse {
+  summary: {
+    totalValue: number;
+    totalCapital: number;
+    pnl: number;
+    pnlPct: number;
+    dayChange: number;
+    dayChangePct: number;
+    positions: number;
+    inMarket: number;
+  };
+  history: Array<{ date: string; value: number }>;
+  allocation: Array<{ id: string; symbol: string; value: number; weight: number }>;
+  positions: PortfolioPosition[];
 }
 
 export interface SimulationUpdate {
@@ -52,30 +166,158 @@ export interface OverviewResponse {
   strategiesTrained: string[];
 }
 
+/** Return and risk statistics for one equity curve (annualised, risk-free rate 0). */
+export interface RiskStats {
+  totalReturn: number;
+  annualizedReturn: number;
+  volatility: number;
+  sharpe: number;
+  sortino: number;
+  maxDrawdown: number;
+  calmar: number;
+}
+
+export interface BenchmarkStats extends RiskStats {
+  symbol: string;
+  name: string;
+  /** The strategy's sensitivity to the index, its excess annual return and its correlation. */
+  beta: number;
+  alpha: number;
+  correlation: number;
+}
+
 export interface StrategyMetrics {
   totalReturn: number;
   annualizedReturn: number;
+  volatility?: number;
+  sortino?: number;
+  calmar?: number;
+  slippageBps?: number;
+  buyHoldReturn: number;
+  excessReturn: number;
   winRate: number;
   trades: number;
+  closedTrades: number;
+  avgTradeReturn: number;
   sharpe: number;
   maxDrawdown: number;
+  exposure: number;
+  feeBps: number;
 }
+
+export type StrategyId = "sma-crossover" | "mean-reversion" | "trend-follow" | "ml-logistic" | "buy-hold" | "custom";
 
 export interface TrainingPayload {
   symbol: string;
-  shortWindow: number;
-  longWindow: number;
-  strategyId?: string;
+  strategyId: StrategyId;
+  shortWindow?: number;
+  longWindow?: number;
+  lookback?: number;
+  deviation?: number;
+  channel?: number;
+  threshold?: number;
+  trainWindow?: number;
+  rules?: StrategyRules;
+  slippageBps?: number;
+}
+
+export interface BacktestTrade {
+  entryDate: string;
+  entryPrice: number;
+  exitDate: string;
+  exitPrice: number;
+  return: number;
 }
 
 export interface TrainingResult {
   symbol: string;
-  strategyId: string;
-  shortWindow: number;
-  longWindow: number;
+  strategyId: StrategyId;
+  parameters: Record<string, number>;
+  rules?: StrategyRules | null;
   metrics: StrategyMetrics;
-  sample: Array<{ timestamp: string; close: number; shortSma: number; longSma: number }>;
+  buyHold?: RiskStats;
+  benchmark?: BenchmarkStats | null;
+  model?: ModelReport;
+  trades: BacktestTrade[];
+  openTrade: BacktestTrade | null;
+  sample: Array<
+    {
+      timestamp: string;
+      close: number;
+      equity: number;
+      position: number;
+      buyHold?: number;
+      drawdown?: number;
+      buyHoldDrawdown?: number;
+    } & Record<string, number | string | null | undefined>
+  >;
+  period: { start: string; end: string; days: number };
   trainedAt: string;
+}
+
+/** Out-of-sample quality of the machine-learning strategy's predictions. */
+export interface ModelReport {
+  model: string;
+  predictions: number;
+  accuracy: number;
+  baselineAccuracy: number;
+  upDays: number;
+  auc: number | null;
+  precisionWhenLong: number | null;
+  daysLong: number;
+  threshold: number;
+  trainWindow: number;
+  retrainEvery: number;
+  refits: number;
+  latestProbability: number | null;
+  featureWeights: Array<{ feature: string; weight: number }>;
+}
+
+export type WalkForwardStrategyId = "sma-crossover" | "mean-reversion" | "trend-follow" | "ml-logistic";
+
+export interface WalkForwardPayload {
+  symbol: string;
+  strategyId: WalkForwardStrategyId;
+  slippageBps?: number;
+}
+
+export interface WalkForwardFold {
+  trainStart: string;
+  testStart: string;
+  testEnd: string;
+  params: Record<string, number>;
+  trainSharpe: number;
+  trainReturn: number;
+  testReturn: number;
+  buyHoldReturn: number;
+  trades: number;
+}
+
+export interface WalkForwardResult {
+  symbol: string;
+  strategyId: WalkForwardStrategyId;
+  trainDays: number;
+  testDays: number;
+  gridSize: number;
+  folds: WalkForwardFold[];
+  curve: Array<{ timestamp: string; equity: number; buyHold: number; drawdown: number }>;
+  metrics: {
+    outOfSampleReturn: number;
+    outOfSampleAnnualized: number;
+    outOfSampleSharpe: number;
+    outOfSampleMaxDrawdown: number;
+    inSampleAnnualized: number;
+    buyHoldReturn: number;
+    buyHoldAnnualized: number;
+    buyHoldSharpe: number;
+    foldsBeatBuyHold: number;
+    mostChosenParams: Record<string, number>;
+    mostChosenCount: number;
+    costBps: number;
+  };
+  period: { start: string; end: string; days: number };
+  feeBps: number;
+  slippageBps: number;
 }
 
 export interface PredictionResult {
